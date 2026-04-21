@@ -58,7 +58,7 @@ The app leverages a robust `Process` management system using `Pipe` for real-tim
 ### Build Instructions
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/yourusername/RXDownloader.git
+    git clone https://github.com/rimax200/Swift-YouTube-Video-Downloader.git
     ```
 2.  Open `RXDownloader.xcodeproj` in Xcode.
 3.  Ensure the binaries in the `Binaries/` folder have target membership checked for the main app.
