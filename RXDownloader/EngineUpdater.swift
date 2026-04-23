@@ -9,62 +9,52 @@ enum UpdateStatus: Equatable {
     case error(String)
 }
 
-class EngineUpdater: ObservableObject {
+// NSObject base class is required to conform to URLSessionDownloadDelegate
+class EngineUpdater: NSObject, ObservableObject {
     @Published var status: UpdateStatus = .idle
-    private var cancellables = Set<AnyCancellable>()
-    
-    // MARK: - Paths
-    
-    private let binaryName = "yt-dlp"
-    
-    private var appSupportBinDir: URL {
+
+    private var downloadSession: URLSession?
+
+    // Mirrors BinaryManager's bin directory — must stay in sync with BinaryManager.appSupportBinPath
+    private var ytDlpPath: String {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let binDir = appSupport.appendingPathComponent("Binaries", isDirectory: true)
-        try? FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
-        return binDir
+        return appSupport.appendingPathComponent("RXDownloader/bin/yt-dlp").path
     }
-    
+
     var activeBinaryPath: String {
-        let localURL = appSupportBinDir.appendingPathComponent(binaryName)
-        if FileManager.default.fileExists(atPath: localURL.path) {
-            return localURL.path
-        }
-        // Fallback to bundle version if we haven't seeded yet
-        return Bundle.main.path(forResource: binaryName, ofType: nil) ?? ""
+        let path = ytDlpPath
+        if FileManager.default.fileExists(atPath: path) { return path }
+        return Bundle.main.path(forResource: "yt-dlp", ofType: nil) ?? ""
     }
-    
-    // MARK: - Lifecycle
-    
-    init() {
+
+    override init() {
+        super.init()
         seedInitialBinary()
     }
-    
-    /// Copies the bundled binary to Application Support on first launch
+
+    /// Copies the bundled binary on first launch if BinaryManager hasn't run yet.
     private func seedInitialBinary() {
-        let localURL = appSupportBinDir.appendingPathComponent(binaryName)
-        if !FileManager.default.fileExists(atPath: localURL.path) {
-            if let bundlePath = Bundle.main.path(forResource: binaryName, ofType: nil) {
-                try? FileManager.default.copyItem(atPath: bundlePath, toPath: localURL.path)
-                setExecutablePermissions(at: localURL.path)
-            }
-        }
+        let path = ytDlpPath
+        guard !FileManager.default.fileExists(atPath: path) else { return }
+        guard let bundlePath = Bundle.main.path(forResource: "yt-dlp", ofType: nil) else { return }
+        let dir = (path as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? FileManager.default.copyItem(atPath: bundlePath, toPath: path)
+        setExecutable(at: path)
     }
-    
-    // MARK: - Update Logic
-    
+
+    // MARK: - Public API
+
     func checkForUpdates() {
         guard status == .idle else { return }
         status = .checking
-        
-        fetchLatestReleaseMetadata { [weak self] result in
+
+        fetchLatestRelease { [weak self] result in
             guard let self = self else { return }
-            
             switch result {
-            case .success(let githubVersion, let downloadURL):
+            case .success(let (githubVersion, downloadURL)):
                 let localVersion = self.getLocalVersion()
-                
                 if githubVersion != localVersion {
-                    print("Update available: \(localVersion) -> \(githubVersion)")
                     self.performDownload(from: downloadURL)
                 } else {
                     DispatchQueue.main.async {
@@ -72,105 +62,128 @@ class EngineUpdater: ObservableObject {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.status = .idle }
                     }
                 }
-                
             case .failure(let error):
                 DispatchQueue.main.async { self.status = .error(error.localizedDescription) }
             }
         }
     }
-    
+
+    // MARK: - Private Helpers
+
     private func getLocalVersion() -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: activeBinaryPath)
         process.arguments = ["--version"]
-        
         let pipe = Pipe()
         process.standardOutput = pipe
-        
+        process.standardError = Pipe()
         do {
             try process.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        } catch {
-            return ""
-        }
+        } catch { return "" }
     }
-    
-    private func fetchLatestReleaseMetadata(completion: @escaping (Result<(String, URL), Error>) -> Void) {
+
+    private func fetchLatestRelease(completion: @escaping (Result<(String, URL), Error>) -> Void) {
         let url = URL(string: "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest")!
-        
         URLSession.shared.dataTask(with: url) { data, _, error in
             if let error = error { completion(.failure(error)); return }
-            guard let data = data else { completion(.failure(NSError(domain: "EngineUpdater", code: 0, userInfo: [NSLocalizedDescriptionKey: "No data from GitHub"]))); return }
-            
+            guard let data = data else {
+                completion(.failure(NSError(domain: "EngineUpdater", code: 0,
+                    userInfo: [NSLocalizedDescriptionKey: "No data from GitHub"])))
+                return
+            }
             do {
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let tagName = json["tag_name"] as? String,
-                   let assets = json["assets"] as? [[String: Any]] {
-                    
-                    // Find the asset named "yt-dlp" (generic Unix/Mac binary)
-                    if let asset = assets.first(where: { ($0["name"] as? String) == "yt-dlp" }),
-                       let downloadURLString = asset["browser_download_url"] as? String,
-                       let downloadURL = URL(string: downloadURLString) {
-                        completion(.success((tagName, downloadURL)))
-                        return
-                    }
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tagName = json["tag_name"] as? String,
+                      let assets = json["assets"] as? [[String: Any]],
+                      let asset = assets.first(where: { ($0["name"] as? String) == "yt-dlp" }),
+                      let urlString = asset["browser_download_url"] as? String,
+                      let downloadURL = URL(string: urlString) else {
+                    completion(.failure(NSError(domain: "EngineUpdater", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Could not parse release assets"])))
+                    return
                 }
-                completion(.failure(NSError(domain: "EngineUpdater", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not parse release assets"])))
+                completion(.success((tagName, downloadURL)))
             } catch {
                 completion(.failure(error))
             }
         }.resume()
     }
-    
+
     private func performDownload(from url: URL) {
         DispatchQueue.main.async { self.status = .downloading(0.0) }
-        
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, _, error in
-            guard let self = self else { return }
-            
-            if let error = error {
-                DispatchQueue.main.async { self.status = .error(error.localizedDescription) }
-                return
-            }
-            
-            guard let tempURL = tempURL else {
-                DispatchQueue.main.async { self.status = .error("Download failed") }
-                return
-            }
-            
-            self.replaceBinary(with: tempURL)
-        }
-        
-        // Track progress if needed (simplified here)
-        task.resume()
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        downloadSession = session
+        session.downloadTask(with: url).resume()
     }
-    
-    private func replaceBinary(with tempURL: URL) {
-        let destinationURL = appSupportBinDir.appendingPathComponent(binaryName)
-        let fileManager = FileManager.default
-        
+
+    private func installBinary(from tempURL: URL) {
+        let destinationURL = URL(fileURLWithPath: ytDlpPath)
+        let fm = FileManager.default
+
+        // Ensure the bin directory exists
+        try? fm.createDirectory(at: destinationURL.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
         do {
-            if fileManager.fileExists(atPath: destinationURL.path) {
-                _ = try fileManager.replaceItemAt(destinationURL, withItemAt: tempURL)
+            if fm.fileExists(atPath: destinationURL.path) {
+                _ = try fm.replaceItemAt(destinationURL, withItemAt: tempURL)
             } else {
-                try fileManager.moveItem(at: tempURL, to: destinationURL)
+                try fm.moveItem(at: tempURL, to: destinationURL)
             }
-            
-            setExecutablePermissions(at: destinationURL.path)
-            
+            setExecutable(at: destinationURL.path)
+            removeQuarantine(at: destinationURL)
             DispatchQueue.main.async {
                 self.status = .success("Updated successfully")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.status = .idle }
             }
         } catch {
-            DispatchQueue.main.async { self.status = .error("File replacement error: \(error.localizedDescription)") }
+            DispatchQueue.main.async {
+                self.status = .error("Installation failed: \(error.localizedDescription)")
+            }
         }
     }
-    
-    private func setExecutablePermissions(at path: String) {
-        let attributes = [FileAttributeKey.posixPermissions: 0o755]
-        try? FileManager.default.setAttributes(attributes, ofItemAtPath: path)
+
+    private func setExecutable(at path: String) {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+    }
+
+    private func removeQuarantine(at url: URL) {
+        var mutableURL = url
+        var values = URLResourceValues()
+        values.quarantineProperties = nil
+        try? mutableURL.setResourceValues(values)
+    }
+}
+
+// MARK: - URLSessionDownloadDelegate (progress tracking)
+
+extension EngineUpdater: URLSessionDownloadDelegate {
+    func urlSession(_ session: URLSession,
+                    downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        DispatchQueue.main.async { self.status = .downloading(progress) }
+    }
+
+    func urlSession(_ session: URLSession,
+                    downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        installBinary(from: location)
+        session.finishTasksAndInvalidate()
+        downloadSession = nil
+    }
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        guard let error = error else { return }
+        DispatchQueue.main.async { self.status = .error(error.localizedDescription) }
+        session.finishTasksAndInvalidate()
+        downloadSession = nil
     }
 }

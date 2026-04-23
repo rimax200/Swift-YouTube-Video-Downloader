@@ -133,13 +133,7 @@ class BinaryManager {
     }
     
     func getBinaryPath(for name: String) -> String {
-        if name.isEmpty {
-            print("[BinaryManager] Requested bin directory: \(appSupportBinPath)")
-            return appSupportBinPath
-        }
-        let normalizedName = name.lowercased()
-        let path = (appSupportBinPath as NSString).appendingPathComponent(normalizedName)
-        print("[BinaryManager] Requested path for '\(name)' (normalized: '\(normalizedName)'): \(path)")
-        return path
+        if name.isEmpty { return appSupportBinPath }
+        return (appSupportBinPath as NSString).appendingPathComponent(name.lowercased())
     }
 }

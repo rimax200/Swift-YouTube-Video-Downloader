@@ -27,13 +27,14 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(PlainButtonStyle())
-                    .disabled(url.isEmpty || manager.status == .fetching || manager.status == .fetchingFormats)
-                    .opacity(url.isEmpty || manager.status == .fetching || manager.status == .fetchingFormats ? 0.3 : 1.0)
+                    .disabled(url.isEmpty || manager.status == .fetching)
+                    .opacity(url.isEmpty || manager.status == .fetching ? 0.3 : 1.0)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
                 
-                if manager.status == .fetching {
+                if manager.status == .fetching && manager.currentMetadata == nil {
+                    // Full-screen spinner only when no quick preview is available
                     VStack(spacing: 12) {
                         ProgressView()
                             .scaleEffect(0.6)
@@ -59,11 +60,26 @@ struct ContentView: View {
                             .frame(width: 100, height: 60)
                             .cornerRadius(8)
                             .clipped()
-                            
-                            Text(metadata.title)
-                                .raycastFont(size: 14, color: Color(hex: "f9f9f9"), weight: .semibold)
-                                .lineLimit(2)
+
+                            // Title — skeleton while oEmbed/yt-dlp hasn't returned a title yet
+                            if manager.status == .fetching && metadata.title.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color.white.opacity(0.1))
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 12)
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color.white.opacity(0.06))
+                                        .frame(maxWidth: 120)
+                                        .frame(height: 12)
+                                }
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                Text(metadata.title)
+                                    .raycastFont(size: 14, color: Color(hex: "f9f9f9"), weight: .semibold)
+                                    .lineLimit(2)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                         .padding(12)
                         
@@ -102,20 +118,20 @@ struct ContentView: View {
                                         isSelected: true,
                                         onTap: {}
                                     )
-                                } else if manager.status == .fetchingFormats {
-                                    // Lazy-path still running — show inline spinner
+                                } else if manager.status == .fetching {
+                                    // yt-dlp still running — quick preview is visible but formats not ready
                                     VStack(spacing: 8) {
                                         ProgressView()
                                             .scaleEffect(0.5)
                                             .colorInvert()
-                                        Text("Loading qualities...")
+                                        Text("Loading formats...")
                                             .raycastFont(size: 11, color: .white.opacity(0.3))
                                     }
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     .padding(.vertical, 20)
                                 } else {
                                     let formats = selectedType == .video ? metadata.videoFormats : metadata.audioFormats
-                                    
+
                                     if formats.isEmpty {
                                         VStack(spacing: 6) {
                                             Image(systemName: "tray")
@@ -161,7 +177,7 @@ struct ContentView: View {
                                     .background(Capsule().fill(Color.white))
                             }
                             .buttonStyle(PlainButtonStyle())
-                            .disabled(manager.isDownloading || manager.status == .fetchingFormats || (selectedFormat.isEmpty && selectedType != .thumbnail))
+                            .disabled(manager.isDownloading || manager.status == .fetching || (selectedFormat.isEmpty && selectedType != .thumbnail))
                             .opacity(manager.isDownloading ? 0.5 : 1.0)
                         }
                         .padding(12)

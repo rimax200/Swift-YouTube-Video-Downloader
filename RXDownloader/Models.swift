@@ -100,7 +100,6 @@ enum DownloadType: String, CaseIterable, Identifiable {
 enum DownloadStatus: Equatable {
     case idle
     case fetching
-    case fetchingFormats   // Lazy-path: fast preview shown, formats still loading
     case downloading(Double)
     case processing
     case completed
